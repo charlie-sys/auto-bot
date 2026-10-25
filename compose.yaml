@@ -1,0 +1,41 @@
+services:
+  api:
+    build: ./server
+    env_file: .env
+    ports:
+      - "${PORT:-8080}:8080"
+    restart: unless-stopped
+    volumes:
+      - reader_data:/data
+      - camera_frames:/camera-frames:ro
+
+  camera:
+    image: bluenviron/mediamtx:1.21.2-ffmpeg
+    profiles: [camera]
+    environment:
+      MTX_AUTHHTTPADDRESS: "http://cameraauth:${CAMERA_AUTH_SECRET:-disabled}@api:8080/internal/camera-auth"
+    ports:
+      - "${CAMERA_RTMP_PORT:-1935}:1935"
+    volumes:
+      - ./camera/mediamtx.yml:/mediamtx.yml:ro
+      - ./camera/run-camera.sh:/camera/run-camera.sh:ro
+      - camera_frames:/frames
+    user: "10001:10001"
+    depends_on: [api]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  reader_data:
+  camera_frames:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=128m,uid=10001,gid=10001,mode=0770"

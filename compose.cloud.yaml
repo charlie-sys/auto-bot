@@ -1,0 +1,56 @@
+name: question-reader-cloud
+
+services:
+  api:
+    build: ./server
+    env_file: ${CLOUD_ENV_FILE:-.env.cloud}
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    expose:
+      - "8080"
+    volumes:
+      - reader_data:/data
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gateway:
+    image: caddy:2-alpine
+    environment:
+      DOMAIN: ${DOMAIN:?请在 .env.cloud 中设置 DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.cloud:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  reader_data:
+  caddy_data:
+  caddy_config:

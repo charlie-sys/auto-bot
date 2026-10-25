@@ -1,0 +1,20 @@
+logLevel: error
+authMethod: http
+authHTTPExclude: []
+rtsp: true
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+rtmp: true
+rtmpAddress: :1935
+hls: false
+webrtc: false
+srt: false
+api: false
+metrics: false
+pprof: false
+paths:
+  '~^live/cam_[a-f0-9]{32}$':
+    source: publisher
+    overridePublisher: false
+    runOnReady: /bin/sh /camera/run-camera.sh
+    runOnReadyRestart: true
