@@ -62,6 +62,7 @@ class ReaderUi(
     private lateinit var statusTitle: TextView
     private lateinit var statusDetail: TextView
     private lateinit var mouthHint:TextView
+    private lateinit var soundHint:TextView
     private var mouthMode=false
     private var mouthFront=true
     private lateinit var progress: ProgressBar
@@ -192,6 +193,7 @@ class ReaderUi(
         statusContent.addView(statusDetail, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
         mouthHint=text("",11f,teal).apply{visibility=View.GONE;setPadding(0,dp(5),0,0)}
         statusContent.addView(mouthHint)
+        soundHint=text("",11f,teal).apply{visibility=View.GONE;setPadding(0,dp(5),0,0)};statusContent.addView(soundHint)
         status.addView(statusContent, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(status, margins(-1, -2, bottom = 8))
 
@@ -378,6 +380,7 @@ class ReaderUi(
         mouthMode=enabled;mouthFront=front;mouthHint.visibility=if(enabled)View.VISIBLE else View.GONE;mouthHint.text=message
         if(enabled)cameraMode.text=if(front)"前置 · 等待张嘴" else "后置 · 拍题解答"
     }
+    fun setSoundState(enabled:Boolean,message:String){soundHint.visibility=if(enabled)View.VISIBLE else View.GONE;soundHint.text=message}
 
     fun setCameraFacing(front: Boolean, available: Boolean, starting: Boolean) {
         cameraSwitchAvailable = available

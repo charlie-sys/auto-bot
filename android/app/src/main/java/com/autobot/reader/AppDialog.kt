@@ -86,7 +86,7 @@ internal class AppDialog private constructor(context:Context,config:Builder):Dia
         internal var content:View?=null
         internal var destructive=false
         internal val actions=linkedMapOf<Int,Pair<CharSequence,((DialogInterface,Int)->Unit)?>>()
-        fun setTitle(value:CharSequence)=apply{heading=value;destructive=listOf("清空","移除","退出","重置推流").any{value.contains(it)}}
+        fun setTitle(value:CharSequence)=apply{heading=value;destructive=listOf("清空","移除","退出","删除","重置推流").any{value.contains(it)}}
         fun setMessage(value:CharSequence)=apply{message=value}
         fun setView(value:View)=apply{content=value}
         fun setNegativeButton(value:CharSequence,listener:((DialogInterface,Int)->Unit)?)=apply{actions[BUTTON_NEGATIVE]=value to listener}

@@ -31,6 +31,7 @@ class ReaderService : Service(), LifecycleOwner {
     private val binder = LocalBinder()
     private val handler = Handler(Looper.getMainLooper())
     private var background = false
+    private var foregroundTypes=0
     private var closing = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var wakeRenewedAt = 0L
@@ -75,10 +76,12 @@ class ReaderService : Service(), LifecycleOwner {
     }
 
     fun enableBackground() {
-        if (background) return
         var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
         if (Build.VERSION.SDK_INT >= 30 && !engine.isNetworkCamera()) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        if(Build.VERSION.SDK_INT>=30&&engine.soundControlEnabled()&&androidx.core.content.ContextCompat.checkSelfPermission(this,android.Manifest.permission.RECORD_AUDIO)==android.content.pm.PackageManager.PERMISSION_GRANTED)types=types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        if(background&&foregroundTypes==types)return
         ServiceCompat.startForeground(this, NOTIFICATION, notification(), types)
+        foregroundTypes=types
         background = true
         handler.removeCallbacks(tick)
         handler.post(tick)
@@ -86,6 +89,7 @@ class ReaderService : Service(), LifecycleOwner {
 
     fun disableBackground() {
         background = false
+        foregroundTypes=0
         handler.removeCallbacks(tick)
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -113,6 +117,7 @@ class ReaderService : Service(), LifecycleOwner {
 
     private fun notificationText(): String = when {
         engine.busy -> "正在处理题目，锁屏后继续运行"
+        engine.isSoundListening() -> "声音控制拍照已开启，正在使用麦克风"
         engine.running && !engine.paused -> "摄像头识题运行中，锁屏后继续运行"
         engine.running -> "自动识题已暂停，可返回应用继续"
         else -> "后台模式已开启，请返回应用开始识题"

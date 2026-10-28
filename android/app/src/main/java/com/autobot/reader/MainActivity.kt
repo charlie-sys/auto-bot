@@ -52,6 +52,9 @@ class MainActivity : ComponentActivity() {
     private var readingOverlay = false
     private var preferencesSheet:SettingsSheet?=null
     private var mouthTrialDialog:android.app.Dialog?=null
+    private var soundPanel:SoundControlUi?=null
+    private var soundDialog:android.app.Dialog?=null
+    private var microphoneAction:(()->Unit)?=null
     private fun setReadingOverlay(value:Boolean){readingOverlay=value||preferencesSheet?.dialog?.isShowing==true||(::ui.isInitialized&&ui.hasReadingPage());if(::engine.isInitialized)engine.readingResults=readingOverlay}
     private var pendingPhoto: android.net.Uri? = null
     private var pendingManualCapture: Boolean? = null
@@ -89,6 +92,17 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) Toast.makeText(this, "通知未授权，可在系统运行中的应用里停止后台任务", Toast.LENGTH_LONG).show()
     }
+    private val microphonePermission=registerForActivityResult(ActivityResultContracts.RequestPermission()){granted->
+        val action=microphoneAction;microphoneAction=null
+        if(granted)action?.invoke()else Toast.makeText(this,"声音控制需要麦克风权限，其他识题功能仍可使用",Toast.LENGTH_LONG).show()
+    }
+    private fun withMicrophone(action:()->Unit){
+        if(ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED)action()
+        else {microphoneAction=action;microphonePermission.launch(Manifest.permission.RECORD_AUDIO)}
+    }
+    private fun showSoundPanel(){withMicrophone{
+        if(soundDialog?.isShowing!=true){soundPanel=SoundControlUi(this,engine){setReadingOverlay(it)};soundDialog=soundPanel!!.show()}
+    }}
     private val mouthTrialPermission=registerForActivityResult(ActivityResultContracts.RequestPermission()){granted->
         if(granted)showMouthTrial()else Toast.makeText(this,"嘴型试用需要相机权限",Toast.LENGTH_SHORT).show()
     }
@@ -124,6 +138,7 @@ class MainActivity : ComponentActivity() {
                 }
             },
             onSignedOut = {
+                soundPanel?.close();microphoneAction=null
                 mouthTrialDialog?.dismiss()
                 preferencesSheet?.dialog?.dismiss()
                 if (::engine.isInitialized) { engine.resetAccount(); engine.onAuthExpired = null }
@@ -146,6 +161,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        soundPanel?.stopAudio()
         if (::ui.isInitialized) ui.cancelUnlock()
         if (::engine.isInitialized) {
             engine.detachUi()
@@ -155,6 +171,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        soundPanel?.close();microphoneAction=null
         mouthTrialDialog?.dismiss()
         preferencesSheet?.dialog?.dismiss()
         if(::ui.isInitialized)ui.close()
@@ -186,6 +203,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestStart() {
+        if(prefs.getBoolean("sound_capture",false)&&ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){withMicrophone{requestStart()};return}
         if(engine.isNetworkCamera()){syncBackgroundMode();engine.startScanning();return}
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             syncBackgroundMode(); engine.startScanning()
@@ -307,6 +325,14 @@ class MainActivity : ComponentActivity() {
         panel.addView(mouthThreshold)
         label("前置画面只在本机处理，不保存、不上传；触发后至少冷却 2.5 秒并需重新闭嘴。请保持手机后置对准题目，切镜头时不要移动。修改时长或幅度后请先保存，再试用。")
         panel.addView(sheet.button("试用嘴型检测（不拍题）"){showMouthTrial()},LinearLayout.LayoutParams(-1,dp(48)).apply{topMargin=dp(10)})
+        label("声音控制拍照",true)
+        val soundCapture=toggle("检测录入声音后拍照","sound_capture",false)
+        label("先录入独特短声音。开启后暂停自动取题，检测到相似声音才拍照；与嘴型控制可同时开启，任一方式触发。解题、暂停、阅读和 App 播报期间忽略声音，不排队补拍。")
+        label("匹配严格程度")
+        val soundLevels=listOf(70,80,90)
+        val soundThreshold=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,listOf("较灵敏 · 更容易触发","正常 · 推荐","严格 · 减少误触"));setSelection(soundLevels.indexOf(prefs.getInt("sound_threshold",80)).coerceAtLeast(0))};panel.addView(soundThreshold)
+        panel.addView(sheet.button("录入声音 / 试用 / 删除"){showSoundPanel()},LinearLayout.LayoutParams(-1,dp(48)).apply{topMargin=dp(10)})
+        label("录音不上传，仅按账号保存匹配特征。改变严格程度后先保存再试用；不同环境、声音距离会影响匹配，建议录入独特短口令或短声组合。")
         label("后台运行", true)
         val background = toggle("后台与锁屏运行", "background_enabled", false)
         panel.addView(TextView(this).apply {
@@ -367,9 +393,13 @@ class MainActivity : ComponentActivity() {
         panel.addView(connectionPanel)
         connection.setOnClickListener { val open = connectionPanel.visibility == View.VISIBLE; connectionPanel.visibility = if (open) View.GONE else View.VISIBLE; connection.text = if (open) "连接设置  ›" else "连接设置  ⌄" }
         val dialog=sheet.dialog
-        sheet.footer("保存偏好") {
+        lateinit var savePreferences:Button
+        savePreferences=sheet.footer("保存偏好") {
+            if(soundCapture.isChecked&&SoundTemplateStore(this).load()==null){Toast.makeText(this,"请先录入并保存触发声音",Toast.LENGTH_LONG).show();return@footer}
+            if(soundCapture.isChecked&&ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){withMicrophone{if(dialog.isShowing)savePreferences.performClick()};return@footer}
             if(mouthCapture.isChecked&&engine.isNetworkCamera()){Toast.makeText(this,"请先切换为手机镜头，再开启嘴型控制",Toast.LENGTH_LONG).show();return@footer}
             prefs.edit().putBoolean("auto_focus", autoFocus.isChecked).putBoolean("auto_zoom", autoZoom.isChecked)
+                .putBoolean("sound_capture",soundCapture.isChecked).putInt("sound_threshold",soundLevels[soundThreshold.selectedItemPosition])
                 .putBoolean("mouth_capture",mouthCapture.isChecked).putInt("mouth_hold_ms",mouthHoldValues[mouthHold.selectedItemPosition]).putInt("mouth_threshold",mouthThresholdValues[mouthThreshold.selectedItemPosition])
                 .putBoolean("anti_shake",antiShake.isChecked)
                 .putBoolean("fast_answers",fastAnswers.isChecked).putBoolean("stream_answers",streamAnswers.isChecked).putBoolean("optimize_upload",optimizeUpload.isChecked).putBoolean("speak_answer_detail",answerDetail.isChecked)

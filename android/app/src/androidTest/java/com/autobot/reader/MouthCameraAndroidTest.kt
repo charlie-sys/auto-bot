@@ -63,10 +63,19 @@ class MouthCameraAndroidTest {
             trigger();waitFor("one successful rear capture and front recovery"){requests.get()==1&&field("mouthBackPhase")==false&&!engine!!.busy&&!engine!!.capturing}
             test.runOnMainSync{assertEquals("5",(field("lastResult") as SolveBatch).questions.single().answer);assertTrue(engine!!.running)}
             status.set(502);trigger();waitFor("failed request must also return to front"){requests.get()==2&&field("mouthBackPhase")==false&&!engine!!.busy&&!engine!!.capturing}
+            status.set(200)
+            test.runOnMainSync{
+                // Inject a detector result into the isolated engine, without opening a microphone.
+                prefs.edit().putBoolean("sound_capture",true).commit()
+                val sound=ReaderEngine::class.java.getDeclaredMethod("triggerFromSound",java.lang.Float.TYPE).apply{isAccessible=true}
+                sound.invoke(engine,.99f);sound.invoke(engine,.99f)
+            }
+            waitFor("sound and mouth share one capture, with no duplicate request"){requests.get()==3&&field("mouthBackPhase")==false&&!engine!!.busy&&!engine!!.capturing}
+            test.runOnMainSync{prefs.edit().putBoolean("sound_capture",false).commit()}
             val sent=engine!!.requestsSent
             trigger();test.runOnMainSync{engine!!.stopScanning()};SystemClock.sleep(2800)
             assertEquals("stop must cancel pending camera-switch shot",sent,engine!!.requestsSent)
-            assertEquals(2,requests.get())
+            assertEquals(3,requests.get())
         }finally{
             test.runOnMainSync{engine?.close()};socket.close();server.join(1000)
             names.forEach{target.deleteSharedPreferences(it)}

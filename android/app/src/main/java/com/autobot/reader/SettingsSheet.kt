@@ -39,8 +39,10 @@ internal class SettingsSheet(private val activity:Activity,val title:String,val 
         background=GradientDrawable().apply{setColor(if(primary)AppPalette.primaryStrong else AppPalette.soft);cornerRadius=dp(12).toFloat()}
         setOnClickListener{action()}
     }
-    fun footer(value:String,action:()->Unit){
-        root.addView(button(value,true,action),LinearLayout.LayoutParams(-1,dp(52)).apply{setMargins(dp(20),dp(10),dp(20),dp(16))})
+    fun footer(value:String,action:()->Unit):Button{
+        val control=button(value,true,action)
+        root.addView(control,LinearLayout.LayoutParams(-1,dp(52)).apply{setMargins(dp(20),dp(10),dp(20),dp(16))})
+        return control
     }
     fun show(){dialog.show();dialog.window?.apply{setLayout(-1,-1);statusBarColor=AppPalette.background;navigationBarColor=AppPalette.background;decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)}}
 }

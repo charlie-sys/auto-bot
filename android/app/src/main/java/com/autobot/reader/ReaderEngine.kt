@@ -58,12 +58,39 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     private var mouthGate:MouthGestureGate?=null
     private fun wantsMouth()=prefs.getBoolean("mouth_capture",false)
     private fun mouthSignature()="${prefs.getInt("mouth_hold_ms",600)}:${prefs.getInt("mouth_threshold",22)}"
+    private var soundMonitor:SoundMonitor?=null
+    private var soundGeneration=0L
+    private var soundMessage=""
+    private val soundShotGate=SoundTriggerGate()
+    fun soundControlEnabled()=prefs.getBoolean("sound_capture",false)
+    fun isSoundListening()=soundMonitor?.listening==true
+    private fun soundState(message:String){soundMessage=message;ui?.setSoundState(soundControlEnabled(),message)}
+    private fun stopSoundMonitor(){soundGeneration++;soundMonitor?.close();soundMonitor=null}
+    private fun soundEligible()=running&&!paused&&!closed&&!readingResults&&!busy&&!capturing&&!cameraStarting&&(!mouthActive||!mouthBackPhase)&&
+        (ui!=null||prefs.getBoolean("background_enabled",false))&&!statusSpeechActive&&speakingIndex>=speakingParts.size&&tts?.isSpeaking!=true
+    private fun syncSoundMonitor(){
+        stopSoundMonitor()
+        if(!soundControlEnabled()){ui?.setSoundState(false,"");return}
+        if(!running||paused){soundState("声音监听已停止，开始或继续识题后启用");return}
+        if(ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){soundState("声音控制需要麦克风权限，请在使用偏好中授权");return}
+        val templates=SoundTemplateStore(this).loadAll().takeIf{it.isNotEmpty()}?:run{soundState("当前账号未保存声音，请先录入");return}
+        val ticket=soundGeneration
+        soundState("声音控制已就绪，先保持安静约 1 秒再发出触发声音")
+        soundMonitor=SoundMonitor(this,templates,prefs.getInt("sound_threshold",80).coerceIn(70,90)/100f,{soundEligible()},
+            {score->runOnUiThread{if(ticket==soundGeneration)triggerFromSound(score)}},
+            {message->runOnUiThread{if(ticket==soundGeneration&&!closed)soundState(message)}}).also{it.start()}
+    }
+    private fun triggerFromSound(score:Float){
+        if(soundControlEnabled()&&soundShotGate.accept(android.os.SystemClock.elapsedRealtime(),score,prefs.getInt("sound_threshold",80)/100f,soundEligible())){
+            soundState("声音匹配 ${(score*100).toInt()}%，正在拍照");manualCapture(false)
+        }
+    }
     private val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
     private var ui: ReaderUi? = null
     private var previewCase: Preview? = null
     private var lensFacing = prefs.getInt("camera_facing", CameraSelector.LENS_FACING_BACK)
         .let { if (it == CameraSelector.LENS_FACING_FRONT) it else CameraSelector.LENS_FACING_BACK }
-    private var cameraStarting = false
+    @Volatile private var cameraStarting = false
     @Volatile private var cameraGeneration = 0L
     private var analysisCase: ImageAnalysis? = null
     private val autoFraming = AutoFramingController()
@@ -113,8 +140,8 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     @Volatile var paused = false
     @Volatile var readingResults = false
     private var manualAfterStart = false
-    var busy = false
-    var capturing = false
+    @Volatile var busy = false
+    @Volatile var capturing = false
     private var lastAnalyzed = 0L
     @Volatile private var requestId = 0L
     private var activePhotoId = 0L
@@ -196,6 +223,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         view.setMuted(prefs.getBoolean("muted", false))
         view.setStatus(status)
         view.setMouthState(mouthActive,mouthMessage,!mouthBackPhase)
+        view.setSoundState(soundControlEnabled(),soundMessage.ifBlank{"声音控制已开启，开始识题后监听"})
         refreshCameraUi()
         view.setNetworkCamera(isNetworkCamera())
         if(isNetworkCamera()){view.setZoom(networkZoom);view.showNetworkFrame(networkBitmap)}
@@ -239,6 +267,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         if (account.token().isBlank()) { onAuthExpired?.invoke(); return false }
         if (busy || capturing) return false
         if (running) paused = true
+        syncSoundMonitor()
         stopSpeech()
         pending?.file?.delete(); pending = null
         ++requestId
@@ -263,6 +292,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         if(running&&!isNetworkCamera()&&(wantsMouth()!=mouthActive||(mouthActive&&mouthConfig!=mouthSignature()))){
             val wasPaused=paused;stopScanning();startScanning();paused=wasPaused
         }
+        syncSoundMonitor()
     }
 
     fun resetAccount() {
@@ -531,7 +561,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     private fun clearNetworkSelection(){networkSelection?.best?.delete();networkSelection=null}
 
     private fun startNetworkScanning(){
-        if(running){paused=false;setStatus("等待网络相机新题目");return}
+        if(running){paused=false;syncSoundMonitor();setStatus("等待网络相机新题目");return}
         val base=prefs.getString("base_url","").orEmpty()
         if(runCatching{AccountApi.server(base)}.isFailure){setStatus("请先配置识题后端地址");return}
         running=true;paused=false;cameraStarting=false
@@ -553,6 +583,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                 if(code==401){stopAll();onAuthExpired?.invoke()}
             }
         }).also{it.start()}
+        syncSoundMonitor()
         if(manualAfterStart){manualAfterStart=false;setStatus("等待新鲜网络画面，到图后可点拍照识题")}
     }
 
@@ -584,6 +615,10 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                 return@addOnSuccessListener
             }
             detector.antiShake=prefs.getBoolean("anti_shake",true)
+            if(soundControlEnabled()){
+                if(!busy&&!capturing&&!readingResults&&status!="网络画面已连接，等待触发声音；也可手动拍照")setStatus("网络画面已连接，等待触发声音；也可手动拍照")
+                return@addOnSuccessListener
+            }
             val region=if(boxes.isEmpty())null else floatArrayOf(boxes.minOf{it.left}.toFloat()/bitmap.width,boxes.minOf{it.top}.toFloat()/bitmap.height,boxes.maxOf{it.right}.toFloat()/bitmap.width,boxes.maxOf{it.bottom}.toFloat()/bitmap.height)
             if(detector.observe(text,0,region)){
                 interruptCurrent(false)
@@ -759,7 +794,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             manualAfterStart = false; setStatus("需要摄像头权限才能识题"); return
         }
-        if (running) { paused = false; setStatus("等待新题目"); return }
+        if (running) { paused = false;syncSoundMonitor();setStatus(if(soundControlEnabled())"等待触发声音；也可手动拍照" else "等待新题目"); return }
         running = true
         paused = false
         cameraStarting = true
@@ -798,7 +833,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                 attachPreview()
                 statusHandler.postDelayed({ if (generation == cameraGeneration) requestAutoFocus() }, 300L)
                 camera?.cameraInfo?.zoomState?.observe(owner) { state -> ui?.setZoom(state.zoomRatio) }
-                setStatus(if (paused) "已暂停识题与播报" else "正在自动查找完整题目；可双指或点＋－缩放")
+                setStatus(if (paused) "已暂停识题与播报" else if(soundControlEnabled())"声音控制已启动，对准题目后发出触发声音；也可手动拍照" else "正在自动查找完整题目；可双指或点＋－缩放")
                 if (manualAfterStart) { manualAfterStart = false; statusHandler.postDelayed({ if (running && generation == cameraGeneration) captureQuestion("", 0L) }, 500) }
             } catch (e: Exception) {
                 cameraProvider?.unbindAll();mouthDetector?.close();mouthDetector=null;mouthActive=false;ui?.setMouthState(false,"")
@@ -810,6 +845,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                     cameraStarting = false
                     refreshCameraUi()
                     ui?.updateSession(running, paused, busy, capturing)
+                    syncSoundMonitor()
                 }
             }
         }, ContextCompat.getMainExecutor(this))
@@ -818,11 +854,13 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     fun togglePause() {
         if (!running) return
         paused = !paused
+        syncSoundMonitor()
         if (paused) stopSpeech()
         setStatus(if (paused) "已暂停识题与播报" else "等待新题目")
     }
 
     fun stopScanning() {
+        stopSoundMonitor();soundState("声音监听已停止")
         ++requestId
         networkFeed?.close();networkFeed=null
         clearNetworkSelection()
@@ -904,6 +942,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
             if (!busy&&adjustForText(boxes, rotatedWidth, rotatedHeight, proxy.imageInfo.rotationDegrees, readable)) return@addOnSuccessListener
             detector.antiShake=prefs.getBoolean("anti_shake",true)
             val region=if(boxes.isEmpty())null else floatArrayOf(boxes.minOf{it.left}.toFloat()/rotatedWidth,boxes.minOf{it.top}.toFloat()/rotatedHeight,boxes.maxOf{it.right}.toFloat()/rotatedWidth,boxes.maxOf{it.bottom}.toFloat()/rotatedHeight)
+            if(soundControlEnabled())return@addOnSuccessListener
             val changed = detector.observe(filtered, quality.hash,region)
             if (changed) runOnUiThread {
                 if (running && generation == cameraGeneration && adjustment == adjustmentVersion && !paused && !readingResults && !capturing) {
@@ -1197,6 +1236,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                 }
                 item.file.delete()
                 returnMouthFront(if(response.isSuccess)"解题结束，已返回前置；请闭嘴后再次张嘴" else "解题未完成，已返回前置；请检查连接后重试")
+                if(soundControlEnabled())soundState("本次已结束，安静约 1 秒后可再次发声；两次触发至少间隔 3 秒")
             }
         }
     }
@@ -1240,6 +1280,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         stopSpeech()
         if(pause){
             paused=running
+            syncSoundMonitor()
             if(lastResult==null){resultMessage="已中断当前解答" to "切换题目后点继续；同题重做请点拍照识题";ui?.showMessage(resultMessage!!.first,resultMessage!!.second)}
             setStatus("已中断当前解答与播报，切换题目后点继续；同题可手动重新识别")
             returnMouthFront("已中断，返回前置并暂停；点击继续后闭嘴重试")
