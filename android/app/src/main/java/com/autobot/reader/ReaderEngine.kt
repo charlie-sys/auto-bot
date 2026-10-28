@@ -56,13 +56,29 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     private var mouthConfig=""
     private var mouthBackPhase=false
     private var mouthGate:MouthGestureGate?=null
-    private fun wantsMouth()=prefs.getBoolean("mouth_capture",false)
+    private fun wantsMouth()=if(voiceInputEnabled())voiceMouth()else prefs.getBoolean("mouth_capture",false)
     private fun mouthSignature()="${prefs.getInt("mouth_hold_ms",600)}:${prefs.getInt("mouth_threshold",22)}"
     private var soundMonitor:SoundMonitor?=null
     private var soundGeneration=0L
     private var soundMessage=""
     private val soundShotGate=SoundTriggerGate()
-    fun soundControlEnabled()=prefs.getBoolean("sound_capture",false)
+    private var voiceSession:OfflineVoiceSession?=null
+    private var voiceGeneration=0L
+    private var voiceConfig=""
+    private var voiceTranscript=""
+    private var voiceDraft=""
+    private var voiceRecording=false
+    private val voicePolicy=VoiceQuestionPolicy()
+    fun voiceInputEnabled()=prefs.getString("input_mode","camera")=="voice"
+    private fun voiceMouth()=prefs.getString("voice_trigger","auto")=="mouth"
+    fun requiresCamera()=if(voiceInputEnabled())voiceMouth()else !isNetworkCamera()
+    fun requiresMicrophone()=voiceInputEnabled()||soundControlEnabled()
+    private fun voiceSignature()=if(voiceInputEnabled())"voice:${prefs.getString("voice_trigger","auto")}" else "camera"
+    private var voiceManualAfterStart=false
+    private fun startPendingVoice(){
+        if(voiceManualAfterStart&&voiceSession?.ready==true&&!cameraStarting){voiceManualAfterStart=false;if(voiceEligible())beginVoiceSegment()}
+    }
+    fun soundControlEnabled()=!voiceInputEnabled()&&prefs.getBoolean("sound_capture",false)
     fun isSoundListening()=soundMonitor?.listening==true
     private fun soundState(message:String){soundMessage=message;ui?.setSoundState(soundControlEnabled(),message)}
     private fun stopSoundMonitor(){soundGeneration++;soundMonitor?.close();soundMonitor=null}
@@ -107,7 +123,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         private set
     var automaticZooms = 0L
         private set
-    fun isNetworkCamera()=prefs.getString("camera_source","phone")=="network"
+    fun isNetworkCamera()=!voiceInputEnabled()&&prefs.getString("camera_source","phone")=="network"
     fun sourceChanged(){detector.clearMemory();networkZoom=1f;refreshCameraUi();ui?.setZoom(1f);ui?.updateSession(running,paused,busy,capturing);setStatus("已选择${if(isNetworkCamera())"网络相机" else "手机镜头"}，点击开始识题")}
     private var networkZoom=1f
     private var networkFeed:NetworkFrameClient?=null
@@ -220,10 +236,12 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     fun attachUi(view: ReaderUi) {
         foregroundOnlySuspended = false
         ui = view
+        if(voiceInputEnabled()&&status.startsWith("等待开始"))status="语音内容答题已选择，点击开始听题；仅提交转写文字"
         view.setMuted(prefs.getBoolean("muted", false))
         view.setStatus(status)
         view.setMouthState(mouthActive,mouthMessage,!mouthBackPhase)
         view.setSoundState(soundControlEnabled(),soundMessage.ifBlank{"声音控制已开启，开始识题后监听"})
+        updateVoiceUi()
         refreshCameraUi()
         view.setNetworkCamera(isNetworkCamera())
         if(isNetworkCamera()){view.setZoom(networkZoom);view.showNetworkFrame(networkBitmap)}
@@ -267,6 +285,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         if (account.token().isBlank()) { onAuthExpired?.invoke(); return false }
         if (busy || capturing) return false
         if (running) paused = true
+        voiceSession?.pause();voiceRecording=false
         syncSoundMonitor()
         stopSpeech()
         pending?.file?.delete(); pending = null
@@ -289,10 +308,15 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
             if (statusSpeechActive) { tts?.stop(); statusSpeechActive = false }
         }
         if (!canSpeak()) stopSpeech()
+        if(running&&voiceConfig!=voiceSignature()){
+            stopScanning();startScanning();updateVoiceUi();return
+        }
         if(running&&!isNetworkCamera()&&(wantsMouth()!=mouthActive||(mouthActive&&mouthConfig!=mouthSignature()))){
             val wasPaused=paused;stopScanning();startScanning();paused=wasPaused
         }
         syncSoundMonitor()
+        updateVoiceUi()
+        if(voiceInputEnabled()&&!running)setStatus("语音内容答题已选择，点击开始听题；也可编辑转写解答")
     }
 
     fun resetAccount() {
@@ -300,6 +324,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         busy = false
         lastResult = null
         resultMessage = null
+        voiceTranscript="";voiceDraft="";voicePolicy.reset();updateVoiceUi()
         detector.clearMemory();observedText="";observedAt=0L
         detector.clearQueued("")
         ui?.showMessage("请登录后识题", "每个账号使用自己的模型配置与历史记录")
@@ -454,6 +479,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     }
 
     private fun refreshCameraUi() {
+        if(voiceInputEnabled()&&!voiceMouth()){ui?.setCameraFacing(false,false,cameraStarting);return}
         if(isNetworkCamera()){ui?.setNetworkCamera(true);return}
         ui?.setNetworkCamera(false)
         val canSwitch = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_FRONT) &&
@@ -462,6 +488,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     }
 
     fun flipCamera() {
+        if(voiceInputEnabled()){setStatus("语音模式不使用拍题镜头；可在使用偏好中切回拍照识题");return}
         if(wantsMouth()){setStatus("嘴型控制使用后置拍题；请先关闭嘴型控制再翻转镜头");return}
         if(isNetworkCamera()){setStatus("网络相机不支持前后镜头翻转，请在设置切换来源");return}
         if (closed || busy || capturing || cameraStarting) return
@@ -550,8 +577,14 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
             val urgent = message.contains("失败") || message.contains("已暂停") || message == "已停止"
             if (!urgent && now - lastStatusSpeechAt < 4000L) return@Runnable
             tts?.setSpeechRate(prefs.getInt("speech_rate", 100) / 100f)
+            tts?.setOnUtteranceProgressListener(object:android.speech.tts.UtteranceProgressListener(){
+                override fun onStart(id:String?){}
+                override fun onDone(id:String?){runOnUiThread{if(id?.startsWith("status_")==true)statusSpeechActive=false}}
+                override fun onError(id:String?){runOnUiThread{statusSpeechActive=false}}
+            })
             statusSpeechActive = true
             val result = speakText(spoken, "status_$now")
+            if(result!=TextToSpeech.SUCCESS)statusSpeechActive=false
             if (result == TextToSpeech.SUCCESS) { lastSpokenStatus = spoken; lastStatusSpeechAt = now }
         }
         pendingStatusSpeech = task
@@ -705,10 +738,105 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         }
     }
 
+    private fun updateVoiceUi(){
+        ui?.setVoiceMode(voiceInputEnabled(),voiceMouth())
+        ui?.setVoiceState(voiceSession?.ready==true,voiceRecording,voiceDraft.isNotBlank(),voiceTranscript)
+        ui?.updateSession(running,paused,busy,capturing)
+    }
+    private fun voiceEligible()=running&&!paused&&!closed&&voiceInputEnabled()&&!readingResults&&!busy&&!capturing&&!cameraStarting&&
+        (ui!=null||prefs.getBoolean("background_enabled",false))&&!statusSpeechActive&&speakingIndex>=speakingParts.size&&tts?.isSpeaking!=true
+    private fun startVoiceMode(){
+        if(ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){setStatus("语音听题需要麦克风权限");return}
+        if(voiceMouth()&&ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){setStatus("嘴型听题需要摄像头权限");return}
+        if(running){paused=false;voiceSession?.resume();updateVoiceUi();setStatus("语音听题已继续，请说完整题目");return}
+        running=true;paused=false;cameraStarting=voiceMouth();voiceConfig=voiceSignature()
+        stopSoundMonitor();ui?.setSoundState(false,"");voiceDraft="";voiceTranscript="";voiceRecording=false
+        val ticket=++voiceGeneration;val generation=++cameraGeneration
+        voiceSession=OfflineVoiceSession(this,!voiceMouth(),{voiceEligible()},
+            {text->runOnUiThread{if(ticket==voiceGeneration&&running&&text.isNotBlank()){voiceTranscript=text;updateVoiceUi()}}},
+            {active->runOnUiThread{if(ticket==voiceGeneration&&running){voiceRecording=active;if(active)voiceDraft="";updateVoiceUi()}}},
+            {text,truncated->runOnUiThread{if(ticket==voiceGeneration&&running){
+                voiceRecording=false;voiceTranscript=text
+                if(text.isBlank()){setStatus("没有识别到清晰题目，请重新说题");updateVoiceUi()}
+                else if(truncated){voiceDraft=text;paused=true;voiceSession?.pause();setStatus("本段已达 60 秒，已暂停；请核对转写并编辑提交，或分段重说");updateVoiceUi()}
+                else submitVoiceText(text,false)
+            }}},
+            {message->runOnUiThread{if(ticket==voiceGeneration&&!closed&&running){
+                if(message.startsWith("离线语音识别启动失败")){stopScanning();setStatus(message);return@runOnUiThread}
+                setStatus(message);updateVoiceUi()
+                startPendingVoice()
+            }}}).also{it.start()}
+        if(voiceMouth()){
+            mouthActive=true;mouthBackPhase=false;mouthConfig=mouthSignature()
+            mouthGate=MouthGestureGate(prefs.getInt("mouth_hold_ms",600).toLong(),prefs.getInt("mouth_threshold",22)/100f)
+            val future=ProcessCameraProvider.getInstance(this)
+            future.addListener({
+                if(!running||closed||generation!=cameraGeneration)return@addListener
+                try{cameraProvider=future.get();bindMouthFront(cameraProvider!!,generation)}
+                catch(_:Exception){stopScanning();setStatus("前置嘴型镜头启动失败，请改用自动听题")}
+                finally{cameraStarting=false;updateVoiceUi();refreshCameraUi();startPendingVoice()}
+            },ContextCompat.getMainExecutor(this))
+        }
+        updateVoiceUi()
+    }
+    private fun beginVoiceSegment(){
+        stopSpeech()
+        if(!voiceEligible())return
+        voiceDraft="";voiceTranscript="";mouthGate?.reset()
+        if(voiceSession?.begin()!=true)setStatus("中文离线模型尚未就绪，请稍候")
+        updateVoiceUi()
+    }
+    private fun manualVoiceCapture(force:Boolean=false){
+        if(busy){setStatus("正在解答当前语音题目，可先中断再重说");return}
+        if(!running){voiceManualAfterStart=true;startScanning();return}
+        paused=false
+        if(force){voiceDraft="";voiceSession?.pause();beginVoiceSegment()}
+        else if(voiceRecording)voiceSession?.finish()
+        else if(voiceDraft.isNotBlank())submitVoiceText(voiceDraft,true)
+        else beginVoiceSegment()
+    }
+    fun manualVoiceSubmit(text:String){if(voiceInputEnabled())submitVoiceText(text,true)}
+    private fun submitVoiceText(text:String,force:Boolean){
+        if(busy||closed)return
+        val reason=voicePolicy.inspect(text,android.os.SystemClock.elapsedRealtime(),force)
+        if(reason!=null){voiceDraft=text;voiceTranscript=text;setStatus(reason);updateVoiceUi();return}
+        val token=account.token();if(token.isBlank()){onAuthExpired?.invoke();return}
+        voiceSession?.pause();voiceRecording=false;voiceDraft="";voiceTranscript=text
+        val id=++requestId;val userId=account.id();val namespace=account.previewFolder()
+        val operation=SolveRequest();currentRequest?.cancel();currentRequest=operation;busy=true;requestsSent++
+        val base=prefs.getString("base_url","").orEmpty();val fast=prefs.getBoolean("fast_answers",true)
+        setStatus("正在解答语音转写的题目，录音不上传");updateVoiceUi()
+        networkExecutor.execute{
+            val result=runCatching{SolveApi.solveText(base,token,text,fast,operation)}
+            runOnUiThread{
+                if(closed||operation.cancelled||id!=requestId||userId!=account.id()||namespace!=account.previewFolder())return@runOnUiThread
+                if(currentRequest===operation)currentRequest=null;busy=false
+                result.onSuccess{batch->
+                    val tagged=batch.copy(questions=batch.questions.map{it.copy(brief="语音 · ${it.brief}")})
+                    lastResult=tagged;resultMessage=null
+                    if(tagged.questions.isNotEmpty()){
+                        ui?.showBatch(tagged);setStatus("已解答 ${tagged.questions.size} 道语音题目，请核对原始转写")
+                        runCatching{saveHistory(tagged.questions,null)}.onFailure{Toast.makeText(this,"答案已生成，但历史保存失败",Toast.LENGTH_SHORT).show()}
+                        if(!readingResults&&canSpeak())speak(tagged)
+                    }else{
+                        voiceDraft=text;resultMessage="语音题目信息不足" to batch.uncertainty
+                        ui?.showMessage(resultMessage!!.first,resultMessage!!.second);setStatus("语音题目信息不足，可编辑转写后再提交")
+                    }
+                }.onFailure{error->
+                    voicePolicy.reset()
+                    voiceDraft=text
+                    if(error is ApiException&&error.status==401){stopAll();account.clear();onAuthExpired?.invoke()}
+                    else {resultMessage="语音解题未完成" to (error.message?:"网络错误");ui?.showMessage(resultMessage!!.first,resultMessage!!.second);setStatus("语音解题失败：${error.message}")}
+                }
+                mouthGate?.reset();if(running&&!paused)voiceSession?.resume();updateVoiceUi()
+            }
+        }
+    }
+
     private fun mouthState(message:String){mouthMessage=message;ui?.setMouthState(mouthActive,message,!mouthBackPhase)}
 
     private fun bindMouthFront(provider:ProcessCameraProvider,generation:Long){
-        check(provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)&&provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)){"嘴型拍照需要可用的前置与后置摄像头"}
+        check(provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)&&(voiceInputEnabled()||provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA))){"嘴型控制需要可用的前置摄像头，拍题还需要后置摄像头"}
         mouthDetector?.close();mouthDetector=null
         provider.unbindAll();camera?.cameraInfo?.zoomState?.removeObservers(owner)
         capture=null;analysisCase=null;mouthBackPhase=false;mouthGate?.reset()
@@ -719,19 +847,19 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         val face=MouthFaceAnalyzer{aperture,reason->
             runOnUiThread{
                 if(!closed&&running&&mouthActive&&!mouthBackPhase&&generation==cameraGeneration){
-                    val eligible=!paused&&!readingResults&&!busy&&!capturing&&!cameraStarting&&(ui!=null||prefs.getBoolean("background_enabled",false))
+                    val eligible=!paused&&!readingResults&&!busy&&!capturing&&!cameraStarting&&(ui!=null||prefs.getBoolean("background_enabled",false))&&(!voiceInputEnabled()||(voiceSession?.ready==true&&!voiceRecording&&voiceEligible()))
                     val state=mouthGate?.observe(android.os.SystemClock.elapsedRealtime(),aperture,eligible)
                     mouthState(if(aperture==null&&eligible)reason else state?.message.orEmpty())
-                    if(state?.fire==true&&eligible){switchMouthToRear("",0L)}
+                    if(state?.fire==true&&eligible){if(voiceInputEnabled())beginVoiceSegment()else switchMouthToRear("",0L)}
                 }
             }
         }
         mouthDetector=face;frontAnalysis.setAnalyzer(faceExecutor){face.analyze(it)}
         camera=if(preview!=null)provider.bindToLifecycle(owner,CameraSelector.DEFAULT_FRONT_CAMERA,preview,frontAnalysis)
             else provider.bindToLifecycle(owner,CameraSelector.DEFAULT_FRONT_CAMERA,frontAnalysis)
-        mouthState("请先闭嘴，再张嘴保持拍题；前置画面仅在本机处理")
+        mouthState(if(voiceInputEnabled())"请先闭嘴，再张嘴保持启动本段听题" else "请先闭嘴，再张嘴保持拍题；前置画面仅在本机处理")
         ui?.overlay?.updateBoxes(emptyList(),1,1)
-        setStatus(if(paused)"嘴型拍照已暂停" else "前置嘴型检测已开启，张嘴保持后切换后置拍题")
+        setStatus(if(paused)"嘴型控制已暂停" else if(voiceInputEnabled())"前置嘴型已开启，张嘴保持启动本段听题" else "前置嘴型检测已开启，张嘴保持后切换后置拍题")
     }
 
     private fun switchMouthToRear(text:String,hash:Long){
@@ -787,6 +915,8 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
 
     fun startScanning() {
         if (account.token().isBlank()) { onAuthExpired?.invoke(); return }
+        if(voiceInputEnabled()){startVoiceMode();return}
+        voiceConfig=voiceSignature()
         if(isNetworkCamera()){
             if(wantsMouth()){setStatus("嘴型控制当前仅支持手机后置镜头，请切回手机镜头或关闭嘴型控制");return}
             startNetworkScanning();return
@@ -854,12 +984,14 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     fun togglePause() {
         if (!running) return
         paused = !paused
+        if(paused)voiceSession?.pause()else voiceSession?.resume()
         syncSoundMonitor()
         if (paused) stopSpeech()
-        setStatus(if (paused) "已暂停识题与播报" else "等待新题目")
+        setStatus(if(voiceInputEnabled())if(paused)"已暂停听题与播报" else if(voiceMouth())"请先闭嘴，再张嘴保持启动本段听题" else "自动听题已继续，请说完整题目" else if (paused) "已暂停识题与播报" else "等待新题目")
     }
 
     fun stopScanning() {
+        voiceGeneration++;voiceSession?.close();voiceSession=null;voiceRecording=false;voiceManualAfterStart=false
         stopSoundMonitor();soundState("声音监听已停止")
         ++requestId
         networkFeed?.close();networkFeed=null
@@ -894,6 +1026,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         ui?.overlay?.updateBoxes(emptyList(), 1, 1)
         stopSpeech()
         setStatus("已停止")
+        updateVoiceUi()
     }
 
     fun analyze(proxy: ImageProxy) {
@@ -962,6 +1095,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     }
 
     fun manualCapture(force: Boolean) {
+        if(voiceInputEnabled()){manualVoiceCapture(force);return}
         if(mouthActive&&(busy||capturing||cameraStarting||mouthBackPhase)){setStatus("当前正在拍题或解题，请等待完成；也可先中断任务");return}
         interruptCurrent(false)
         if (!running) { manualAfterStart = true; startScanning(); return }
@@ -1241,12 +1375,12 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         }
     }
 
-    fun saveHistory(results: List<SolveResult>, photo: File) {
+    fun saveHistory(results: List<SolveResult>, photo: File?) {
         if (!prefs.getBoolean("save_history", true)) return
         HistoryRepository.withStorageLock {
         val fresh = JSONArray()
         var savedPhoto = ""
-        if (prefs.getBoolean("save_photos", false)) {
+        if (photo!=null&&prefs.getBoolean("save_photos", false)) {
             val folder = account.photoFolder().apply { mkdirs() }
             val saved = File(folder, "${java.util.UUID.randomUUID()}.jpg")
             photo.copyTo(saved, overwrite = true)
@@ -1280,6 +1414,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         stopSpeech()
         if(pause){
             paused=running
+            voiceSession?.pause();voiceRecording=false
             syncSoundMonitor()
             if(lastResult==null){resultMessage="已中断当前解答" to "切换题目后点继续；同题重做请点拍照识题";ui?.showMessage(resultMessage!!.first,resultMessage!!.second)}
             setStatus("已中断当前解答与播报，切换题目后点继续；同题可手动重新识别")
@@ -1289,15 +1424,22 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
 
     fun explain(question:SolveResult,complete:(Result<SolveResult>)->Unit) {
         if(busy||capturing){complete(Result.failure(java.io.IOException("请等待当前识题完成后再生成解析")));return}
+        val voice=question.photoPath.isBlank()&&question.brief.startsWith("语音 ·")
         val source=QuestionImages.resolve(this,question.photoPath)
-        if(source==null){complete(Result.failure(java.io.IOException("原题图已不存在，请重新上传；历史题目需开启保存照片后才可补充解析")));return}
+        if(source==null&&!voice){complete(Result.failure(java.io.IOException("原题图已不存在，请重新上传；历史题目需开启保存照片后才可补充解析")));return}
         val url=prefs.getString("base_url","").orEmpty();val token=account.token();val userId=account.id();val folder=account.previewFolder();val ticket=++requestId
         val operation=SolveRequest();currentRequest=operation
         busy=true;setStatus("正在按需生成详细解析（计一次调用）")
         networkExecutor.execute {
             val result=runCatching {
+                if(voice){
+                    val batch=SolveApi.solveText(url,token,question.full,false,operation)
+                    val detail=batch.questions.singleOrNull()?:throw java.io.IOException(batch.uncertainty.ifBlank{"未能为当前题目生成解析"})
+                    detail.copy(brief="语音 · ${detail.brief}")
+                }else{
                 val copy=File.createTempFile("detail_",".jpg",cacheDir)
-                try{if(operation.cancelled)throw java.io.IOException("请求已取消");source.copyTo(copy,overwrite=true);SolveApi.explain(url,token,copy,question.full,operation).copy(photoPath=question.photoPath)}finally{copy.delete()}
+                try{if(operation.cancelled)throw java.io.IOException("请求已取消");source!!.copyTo(copy,overwrite=true);SolveApi.explain(url,token,copy,question.full,operation).copy(photoPath=question.photoPath)}finally{copy.delete()}
+                }
             }
             runOnUiThread {
                 if(closed||operation.cancelled||userId!=account.id()||folder!=account.previewFolder()||ticket!=requestId){complete(Result.failure(java.io.IOException("解析已中断")));return@runOnUiThread}
@@ -1354,7 +1496,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) { runOnUiThread { if (utteranceId == "${generation}_${speakingIndex}" && generation == speechGeneration) { speakingIndex++; speakNext() } } }
-            override fun onError(utteranceId: String?) {}
+            override fun onError(utteranceId: String?) {runOnUiThread{if(generation==speechGeneration)stopSpeech()}}
         })
         speakNext()
     }

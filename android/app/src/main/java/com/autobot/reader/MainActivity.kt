@@ -185,7 +185,7 @@ class MainActivity : ComponentActivity() {
     private fun syncBackgroundMode() {
         val active = service ?: return
         if (!prefs.getBoolean("background_enabled", false)) { active.disableBackground(); return }
-        if (!engine.isNetworkCamera() && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+        if (engine.requiresCamera() && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             backgroundPermission.launch(Manifest.permission.CAMERA); return
         }
         runCatching {
@@ -203,7 +203,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestStart() {
-        if(prefs.getBoolean("sound_capture",false)&&ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){withMicrophone{requestStart()};return}
+        if(engine.requiresMicrophone()&&ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){withMicrophone{requestStart()};return}
+        if(!engine.requiresCamera()){syncBackgroundMode();engine.startScanning();return}
         if(engine.isNetworkCamera()){syncBackgroundMode();engine.startScanning();return}
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             syncBackgroundMode(); engine.startScanning()
@@ -212,6 +213,8 @@ class MainActivity : ComponentActivity() {
     fun refreshSourceBackground(){service?.disableBackground();syncBackgroundMode()}
 
     private fun manualCapture(force: Boolean) {
+        if(engine.voiceInputEnabled()&&!engine.requiresCamera()){withMicrophone{syncBackgroundMode();engine.manualCapture(force)};return}
+        if(engine.voiceInputEnabled()&&ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){withMicrophone{manualCapture(force)};return}
         if(engine.isNetworkCamera()){syncBackgroundMode();engine.manualCapture(force);return}
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             pendingManualCapture = force
@@ -248,7 +251,7 @@ class MainActivity : ComponentActivity() {
             onSettings = { showSettings() }, onHistory = { showHistory() }, onZoom = { engine.changeZoom(it) },
             onFlipCamera = { engine.flipCamera() },
             onTouchLockChanged = { prefs.edit().putBoolean("touch_locked", it).apply() },
-            onSpeakQuestion = { engine.speak(SolveBatch(listOf(it), "")) },onExplainQuestion={question,done->engine.explain(question,done)},onAnswerDetail={engine.toggleAnswerDetail()}, onReading = { setReadingOverlay(it) },onAccount={accounts.showAccount()})
+            onSpeakQuestion = { engine.speak(SolveBatch(listOf(it), "")) },onExplainQuestion={question,done->engine.explain(question,done)},onAnswerDetail={engine.toggleAnswerDetail()}, onReading = { setReadingOverlay(it) },onAccount={accounts.showAccount()},onVoiceSubmit={engine.manualVoiceSubmit(it)})
         setContentView(ui.build())
         ui.setTouchLocked(prefs.getBoolean("touch_locked", false))
         ui.setMuted(prefs.getBoolean("muted", false))
@@ -293,6 +296,11 @@ class MainActivity : ComponentActivity() {
             return control
         }
         label("账号与个人模型  ›", true).apply { minHeight = dp(52); setOnClickListener { accounts.showAccount() } }
+        label("解题输入方式",true)
+        val inputMode=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,listOf("拍照识题","语音内容答题 · 本机离线转写"));setSelection(if(prefs.getString("input_mode","camera")=="voice")1 else 0)};panel.addView(inputMode)
+        label("语音内容答题的触发方式")
+        val voiceTrigger=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,listOf("自动听题 · 说完停顿后提交","嘴型控制 · 张嘴启动本段录音"));setSelection(if(prefs.getString("voice_trigger","auto")=="mouth")1 else 0)};panel.addView(voiceTrigger)
+        label("语音模式只上传转写文字，不保存或上传录音。自动模式不使用相机；嘴型模式使用前置检测张嘴。说完整题干和选项，安静约 2 秒后提交；可在首页编辑转写。拍照嘴型和声音触发拍照设置仅在拍照模式生效。")
         label("答题速度", true)
         val fastAnswers=toggle("极速答题 · 简短答案，解析按需生成", "fast_answers",true)
         val streamAnswers=toggle("逐题返回 · 完成一题就显示与播报", "stream_answers",true)
@@ -395,10 +403,11 @@ class MainActivity : ComponentActivity() {
         val dialog=sheet.dialog
         lateinit var savePreferences:Button
         savePreferences=sheet.footer("保存偏好") {
-            if(soundCapture.isChecked&&SoundTemplateStore(this).load()==null){Toast.makeText(this,"请先录入并保存触发声音",Toast.LENGTH_LONG).show();return@footer}
-            if(soundCapture.isChecked&&ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){withMicrophone{if(dialog.isShowing)savePreferences.performClick()};return@footer}
-            if(mouthCapture.isChecked&&engine.isNetworkCamera()){Toast.makeText(this,"请先切换为手机镜头，再开启嘴型控制",Toast.LENGTH_LONG).show();return@footer}
+            if(inputMode.selectedItemPosition==0&&soundCapture.isChecked&&SoundTemplateStore(this).load()==null){Toast.makeText(this,"请先录入并保存触发声音",Toast.LENGTH_LONG).show();return@footer}
+            if((inputMode.selectedItemPosition==1||soundCapture.isChecked)&&ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){withMicrophone{if(dialog.isShowing)savePreferences.performClick()};return@footer}
+            if(inputMode.selectedItemPosition==0&&mouthCapture.isChecked&&prefs.getString("camera_source","phone")=="network"){Toast.makeText(this,"请先切换为手机镜头，再开启嘴型控制",Toast.LENGTH_LONG).show();return@footer}
             prefs.edit().putBoolean("auto_focus", autoFocus.isChecked).putBoolean("auto_zoom", autoZoom.isChecked)
+                .putString("input_mode",if(inputMode.selectedItemPosition==1)"voice" else "camera").putString("voice_trigger",if(voiceTrigger.selectedItemPosition==1)"mouth" else "auto")
                 .putBoolean("sound_capture",soundCapture.isChecked).putInt("sound_threshold",soundLevels[soundThreshold.selectedItemPosition])
                 .putBoolean("mouth_capture",mouthCapture.isChecked).putInt("mouth_hold_ms",mouthHoldValues[mouthHold.selectedItemPosition]).putInt("mouth_threshold",mouthThresholdValues[mouthThreshold.selectedItemPosition])
                 .putBoolean("anti_shake",antiShake.isChecked)

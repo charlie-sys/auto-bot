@@ -9,7 +9,7 @@ from fastapi.responses import Response, StreamingResponse
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 MAX_BODY = 9 * 1024 * 1024
-ALLOWED = re.compile(r"/(?:health|admin/?|admin/assets/(?:app\.js|app\.css)|v1/(?:network-camera/(?:config|frame|rotate)|auth/(?:register|login|logout|password|options|email-code|email-login|email-reset)|me(?:/(?:model(?:/test)?|usage|email|subscription|orders(?:/[A-Za-z0-9]+/(?:qr|refresh))?))?|plans|payments/(?:alipay|wechat)/notify|admin/(?:overview|users(?:/\d+(?:/reset-password)?)?|usage|audit|plans(?:/\d+)?|orders|smtp(?:/test)?|payment)|solve(?:-batch|-stream|-detail|-cancel)?))$")
+ALLOWED = re.compile(r"/(?:health|admin/?|admin/assets/(?:app\.js|app\.css)|v1/(?:network-camera/(?:config|frame|rotate)|auth/(?:register|login|logout|password|options|email-code|email-login|email-reset)|me(?:/(?:model(?:/test)?|usage|email|subscription|orders(?:/[A-Za-z0-9]+/(?:qr|refresh))?))?|plans|payments/(?:alipay|wechat)/notify|admin/(?:overview|users(?:/\d+(?:/reset-password)?)?|usage|audit|plans(?:/\d+)?|orders|smtp(?:/test)?|payment)|solve(?:-batch|-stream|-detail|-cancel|-text)?))$")
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])

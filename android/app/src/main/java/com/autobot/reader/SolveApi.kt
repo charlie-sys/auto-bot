@@ -105,4 +105,18 @@ object SolveApi {
         val call=call(baseUrl,token,"/v1/solve-detail",body(photo,target),request)
         try {call.execute().use {response->checkResponse(response);val json=JSONObject(response.body!!.string());if(request.cancelled)throw IOException("请求已取消");if(!json.optBoolean("readable"))throw IOException(json.optString("uncertainty","无法确定目标题目"));return question(json,false)}}finally{request.release(call);if(active===request)active=null}
     }
+    fun solveText(baseUrl:String,token:String,text:String,fast:Boolean,request:SolveRequest):SolveBatch {
+        val start=android.os.SystemClock.elapsedRealtime()
+        val payload=JSONObject().put("text",text).put("mode",if(fast)"fast" else "full").toString().toRequestBody("application/json".toMediaType())
+        val call=call(baseUrl,token,"/v1/solve-text",payload,request)
+        try{call.execute().use{response->
+            if(response.code==404)throw IOException("后端尚未更新，请先部署支持语音文本解题的新版本")
+            checkResponse(response);if(request.cancelled)throw IOException("请求已取消")
+            val json=JSONObject(response.body!!.string());val values=json.getJSONArray("questions")
+            check(values.length()<=30)
+            val questions=(0 until values.length()).map{question(values.getJSONObject(it),fast)}
+            val elapsed=android.os.SystemClock.elapsedRealtime()-start
+            return SolveBatch(questions,json.optString("uncertainty"),firstAnswerMs=elapsed,elapsedMs=elapsed)
+        }}finally{request.release(call);if(active===request)active=null}
+    }
 }

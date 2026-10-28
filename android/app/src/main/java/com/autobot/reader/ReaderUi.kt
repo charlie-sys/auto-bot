@@ -40,6 +40,7 @@ class ReaderUi(
     private val onAnswerDetail: () -> Unit,
     private val onReading: (Boolean) -> Unit,
     private val onAccount: () -> Unit,
+    private val onVoiceSubmit:(String)->Unit,
 ) {
     val preview = PreviewView(activity).apply { scaleType = PreviewView.ScaleType.FILL_CENTER; implementationMode = PreviewView.ImplementationMode.COMPATIBLE }
     val overlay = FrameOverlay(activity)
@@ -65,6 +66,17 @@ class ReaderUi(
     private lateinit var soundHint:TextView
     private var mouthMode=false
     private var mouthFront=true
+    private var voiceMode=false
+    private var voiceMouthMode=false
+    private var voiceReady=false
+    private var voiceRecording=false
+    private var voiceDraft=false
+    private var voiceTranscript=""
+    private lateinit var voicePanel:LinearLayout
+    private lateinit var voiceEdit:TextView
+    private lateinit var voiceText:TextView
+    private lateinit var voiceHint:TextView
+    private lateinit var zoomControls:LinearLayout
     private lateinit var progress: ProgressBar
     private lateinit var statusDot: View
     private lateinit var zoomText: TextView
@@ -153,6 +165,10 @@ class ReaderUi(
         camera.addView(preview, FrameLayout.LayoutParams(-1, -1))
         camera.addView(networkPreview,FrameLayout.LayoutParams(-1,-1))
         camera.addView(overlay, FrameLayout.LayoutParams(-1, -1))
+        voicePanel=column().apply{visibility=View.GONE;background=shape(softTeal,24);setPadding(dp(22),dp(60),dp(22),dp(58))}
+        voiceText=text("点击开始听题，然后说出完整题干与全部选项",15f,ink).apply{setTextIsSelectable(true)}
+        voicePanel.addView(ScrollView(activity).apply{addView(voiceText)},LinearLayout.LayoutParams(-1,0,1f))
+        camera.addView(voicePanel,FrameLayout.LayoutParams(-1,-1))
         cameraHint = column().apply { gravity = Gravity.CENTER; setBackgroundColor(Color.argb(195, 20, 33, 57)); setPadding(dp(20), dp(20), dp(20), dp(52)) }
         cameraHint.addView(ScanGlyph(activity), LinearLayout.LayoutParams(dp(52), dp(52)))
         cameraHint.addView(text("让题目完整入镜", 18f, Color.WHITE, true), LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(16) })
@@ -166,6 +182,7 @@ class ReaderUi(
         cameraMode = multi
         camera.addView(multi, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(14), dp(14), 0) })
         val zoom = row().apply { background = shape(Color.argb(190, 20, 33, 41), 30); setPadding(dp(3), dp(2), dp(3), dp(2)) }
+        zoomControls=zoom
         zoom.addView(action("−", dark = true) { onZoom(1f / 1.25f) }, LinearLayout.LayoutParams(dp(44), dp(42)))
         zoomText = text("1.0×", 13f, Color.WHITE, true).apply { gravity = Gravity.CENTER; contentDescription = "当前相机缩放倍数" }
         zoom.addView(zoomText, LinearLayout.LayoutParams(dp(56), dp(42)))
@@ -177,6 +194,8 @@ class ReaderUi(
         flipButton = action("翻转", dark = true) { onFlipCamera() }
         flipButton.contentDescription = "切换前后摄像头"
         camera.addView(flipButton, FrameLayout.LayoutParams(dp(60), dp(44), Gravity.BOTTOM or Gravity.END).apply { rightMargin = dp(12); bottomMargin = dp(13) })
+        voiceEdit=action("编辑转写并解答"){editVoiceText()}.apply{visibility=View.GONE}
+        camera.addView(voiceEdit,FrameLayout.LayoutParams(dp(190),dp(44),Gravity.BOTTOM or Gravity.END).apply{rightMargin=dp(12);bottomMargin=dp(13)})
         root.addView(camera, margins(-1, 0, 1.1f, bottom = 10))
 
         val status = row().apply { background=shape(Color.WHITE,14);setPadding(dp(9), dp(9), dp(12), dp(9)) }
@@ -194,6 +213,7 @@ class ReaderUi(
         mouthHint=text("",11f,teal).apply{visibility=View.GONE;setPadding(0,dp(5),0,0)}
         statusContent.addView(mouthHint)
         soundHint=text("",11f,teal).apply{visibility=View.GONE;setPadding(0,dp(5),0,0)};statusContent.addView(soundHint)
+        voiceHint=text("",11f,teal).apply{visibility=View.GONE;maxLines=3;ellipsize=android.text.TextUtils.TruncateAt.END;setPadding(0,dp(5),0,0)};statusContent.addView(voiceHint)
         status.addView(statusContent, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(status, margins(-1, -2, bottom = 8))
 
@@ -208,7 +228,8 @@ class ReaderUi(
         more.contentDescription = "更多操作"
         more.setOnClickListener {
             PopupMenu(activity, more).apply {
-                menu.add("重新识别当前画面").setOnMenuItemClickListener { onRetry(); true }
+                menu.add(if(voiceMode)"重新录入语音题目" else "重新识别当前画面").setOnMenuItemClickListener { onRetry(); true }
+                if(voiceMode)menu.add("编辑转写并解答").setOnMenuItemClickListener{editVoiceText();true}
                 menu.add("播报全部答案").apply { isEnabled = batch != null; setOnMenuItemClickListener { batch?.let(onReplay); true } }
                 menu.add("停止播报").setOnMenuItemClickListener { onStopSpeech(); true }
                 menu.add("开启防误触锁定").setOnMenuItemClickListener { setTouchLocked(true); true }
@@ -378,14 +399,38 @@ class ReaderUi(
 
     fun setMouthState(enabled:Boolean,message:String,front:Boolean=true){
         mouthMode=enabled;mouthFront=front;mouthHint.visibility=if(enabled)View.VISIBLE else View.GONE;mouthHint.text=message
-        if(enabled)cameraMode.text=if(front)"前置 · 等待张嘴" else "后置 · 拍题解答"
+        if(enabled)cameraMode.text=if(voiceMode)"前置 · 嘴型听题" else if(front)"前置 · 等待张嘴" else "后置 · 拍题解答"
     }
     fun setSoundState(enabled:Boolean,message:String){soundHint.visibility=if(enabled)View.VISIBLE else View.GONE;soundHint.text=message}
+    fun setVoiceMode(enabled:Boolean,mouth:Boolean){
+        voiceMode=enabled;voiceMouthMode=mouth
+        voicePanel.visibility=if(enabled&&!mouth)View.VISIBLE else View.GONE
+        voiceEdit.visibility=if(enabled)View.VISIBLE else View.GONE
+        flipButton.visibility=if(enabled)View.GONE else View.VISIBLE
+        voiceHint.visibility=if(enabled)View.VISIBLE else View.GONE
+        zoomControls.visibility=if(enabled)View.GONE else View.VISIBLE
+        if(enabled)cameraHint.visibility=View.GONE
+    }
+    fun setVoiceState(ready:Boolean,recording:Boolean,draft:Boolean,transcript:String){
+        voiceReady=ready;voiceRecording=recording;voiceDraft=draft;voiceTranscript=transcript
+        voiceText.text=transcript.ifBlank{if(voiceMouthMode)"张嘴保持启动一段录音" else "说出完整题目，结束后安静约 2 秒自动提交"}
+        voiceHint.text=if(transcript.isBlank())if(ready)"${if(voiceMouthMode)"张嘴启动听题" else "自动听题已就绪"} · 录音不保存、不上传" else "本机离线转写 · 首次开始需加载模型" else "语音转写：$transcript"
+    }
+    private fun editVoiceText(){
+        if(!voiceMode)return
+        val edit=EditText(activity).apply{setText(voiceTranscript);hint="核对并补充题干、数字和选项";textSize=14f;minLines=4;maxLines=9;filters=arrayOf(android.text.InputFilter.LengthFilter(4000));setTextColor(ink)}
+        val dialog=AppDialog.Builder(activity).setTitle("核对语音转写").setView(edit).setNegativeButton("取消",null).setPositiveButton("解答",null).create()
+        dialog.setOnShowListener{dialog.getButton(AppDialog.BUTTON_POSITIVE).setOnClickListener{
+            val text=edit.text.toString().trim();if(text.length<3){edit.error="请补充完整题目";return@setOnClickListener}
+            dialog.dismiss();onVoiceSubmit(text)
+        }}
+        enterReading();dialog.setOnDismissListener{leaveReading()};dialog.show()
+    }
 
     fun setCameraFacing(front: Boolean, available: Boolean, starting: Boolean) {
         cameraSwitchAvailable = available
         cameraStarting = starting
-        cameraMode.text = if(mouthMode){if(mouthFront)"前置 · 等待张嘴" else "后置 · 拍题解答"} else if (front) "前置 · 多题" else "后置 · 多题"
+        cameraMode.text = if(voiceMode){if(voiceMouthMode)"前置 · 嘴型听题" else "语音 · 自动"} else if(mouthMode){if(mouthFront)"前置 · 等待张嘴" else "后置 · 拍题解答"} else if (front) "前置 · 多题" else "后置 · 多题"
         flipButton.contentDescription = if (!available) "设备不支持前后摄像头切换" else if (front) "当前前置摄像头，点击切换后置" else "当前后置摄像头，点击切换前置"
         overlay.setMirrored(front)
     }
@@ -425,7 +470,7 @@ class ReaderUi(
         flipButton.isEnabled = cameraSwitchAvailable && !cameraStarting && !busy && !capturing
         flipButton.alpha = if (flipButton.isEnabled) 1f else 0.4f
         primary.text = if (!running) "开始识题" else if (paused) "继续识题" else "暂停识题"
-        cameraHint.visibility = if (running) View.GONE else View.VISIBLE
+        cameraHint.visibility = if (running||voiceMode) View.GONE else View.VISIBLE
         sessionBadge.text = if (!running) "●  待开始" else if (paused) "Ⅱ  已暂停" else "●  自动识题中"
         sessionBadge.setTextColor(if (running && !paused) Color.rgb(157, 190, 255) else Color.WHITE)
         uploadButton.isEnabled = !capturing && !busy && !cameraStarting
@@ -436,6 +481,14 @@ class ReaderUi(
         captureButton.isEnabled = !capturing && !busy && !cameraStarting
         captureButton.alpha = if (captureButton.isEnabled) 1f else 0.45f
         captureButton.text = if (capturing) "正在拍照" else if (busy) "正在解题" else "拍照识题"
+        if(voiceMode){
+            sessionBadge.text=if(!running)"●  待开始" else if(paused)"Ⅱ  已暂停" else if(voiceRecording)"●  正在听题" else if(voiceMouthMode)"●  等待张嘴" else "●  自动听题中"
+            if(!busy&&!capturing)primary.text=if(!running)"开始听题" else if(paused)"继续听题" else "暂停听题"
+            captureButton.text=if(busy)"正在解题" else if(voiceRecording)"提交本段" else if(voiceDraft)"提交转写" else "录入本题"
+            captureButton.isEnabled=!busy&&!cameraStarting&&(!running||voiceReady)
+            captureButton.alpha=if(captureButton.isEnabled)1f else .45f
+            flipButton.isEnabled=false;flipButton.alpha=.4f
+        }
     }
 
     fun setStatus(message: String) {
@@ -456,6 +509,7 @@ class ReaderUi(
             warning -> "调整一下取景"
             message.startsWith("已解答") || message.startsWith("已获得") -> "答案已准备好"
             message.contains("发现新题") -> "发现了新题目"
+            message.contains("语音")||message.contains("听题")||message.contains("录音")||message.contains("转写")||message.contains("离线模型") -> "语音内容答题"
             else -> "正在寻找题目"
         }
         statusTitle.text = title

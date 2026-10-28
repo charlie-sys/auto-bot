@@ -10,8 +10,8 @@ android {
         applicationId = "com.autobot.reader"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "2.9.0"
+        versionCode = 27
+        versionName = "3.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes { release { isMinifyEnabled = false } }
@@ -41,4 +41,6 @@ dependencies {
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.ai.edge.litert:litert:1.4.2")
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
 }
