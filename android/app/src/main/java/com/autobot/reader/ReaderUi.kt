@@ -61,6 +61,9 @@ class ReaderUi(
     private lateinit var cameraHint: LinearLayout
     private lateinit var statusTitle: TextView
     private lateinit var statusDetail: TextView
+    private lateinit var mouthHint:TextView
+    private var mouthMode=false
+    private var mouthFront=true
     private lateinit var progress: ProgressBar
     private lateinit var statusDot: View
     private lateinit var zoomText: TextView
@@ -187,6 +190,8 @@ class ReaderUi(
         statusDetail = text("将题目对准镜头，稳定后自动拍照", 11f, muted).apply { maxLines = 2;ellipsize=android.text.TextUtils.TruncateAt.END }
         statusContent.addView(statusTitle)
         statusContent.addView(statusDetail, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        mouthHint=text("",11f,teal).apply{visibility=View.GONE;setPadding(0,dp(5),0,0)}
+        statusContent.addView(mouthHint)
         status.addView(statusContent, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(status, margins(-1, -2, bottom = 8))
 
@@ -369,10 +374,15 @@ class ReaderUi(
         onTouchLockChanged(locked)
     }
 
+    fun setMouthState(enabled:Boolean,message:String,front:Boolean=true){
+        mouthMode=enabled;mouthFront=front;mouthHint.visibility=if(enabled)View.VISIBLE else View.GONE;mouthHint.text=message
+        if(enabled)cameraMode.text=if(front)"前置 · 等待张嘴" else "后置 · 拍题解答"
+    }
+
     fun setCameraFacing(front: Boolean, available: Boolean, starting: Boolean) {
         cameraSwitchAvailable = available
         cameraStarting = starting
-        cameraMode.text = if (front) "前置 · 多题" else "后置 · 多题"
+        cameraMode.text = if(mouthMode){if(mouthFront)"前置 · 等待张嘴" else "后置 · 拍题解答"} else if (front) "前置 · 多题" else "后置 · 多题"
         flipButton.contentDescription = if (!available) "设备不支持前后摄像头切换" else if (front) "当前前置摄像头，点击切换后置" else "当前后置摄像头，点击切换前置"
         overlay.setMirrored(front)
     }

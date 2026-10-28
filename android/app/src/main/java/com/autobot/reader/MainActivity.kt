@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
     private var bound = false
     private var readingOverlay = false
     private var preferencesSheet:SettingsSheet?=null
+    private var mouthTrialDialog:android.app.Dialog?=null
     private fun setReadingOverlay(value:Boolean){readingOverlay=value||preferencesSheet?.dialog?.isShowing==true||(::ui.isInitialized&&ui.hasReadingPage());if(::engine.isInitialized)engine.readingResults=readingOverlay}
     private var pendingPhoto: android.net.Uri? = null
     private var pendingManualCapture: Boolean? = null
@@ -88,6 +89,14 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) Toast.makeText(this, "通知未授权，可在系统运行中的应用里停止后台任务", Toast.LENGTH_LONG).show()
     }
+    private val mouthTrialPermission=registerForActivityResult(ActivityResultContracts.RequestPermission()){granted->
+        if(granted)showMouthTrial()else Toast.makeText(this,"嘴型试用需要相机权限",Toast.LENGTH_SHORT).show()
+    }
+    private fun showMouthTrial(){
+        if(ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){mouthTrialPermission.launch(Manifest.permission.CAMERA);return}
+        if(mouthTrialDialog?.isShowing==true)return
+        mouthTrialDialog=MouthControlUi(this,engine){setReadingOverlay(it)}.show()
+    }
     private val photoPicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (AccountStore(this).token().isBlank()) { pendingPhoto = null; return@registerForActivityResult }
         if (!::engine.isInitialized) { pendingPhoto = uri; return@registerForActivityResult }
@@ -115,6 +124,7 @@ class MainActivity : ComponentActivity() {
                 }
             },
             onSignedOut = {
+                mouthTrialDialog?.dismiss()
                 preferencesSheet?.dialog?.dismiss()
                 if (::engine.isInitialized) { engine.resetAccount(); engine.onAuthExpired = null }
                 service?.disableBackground()
@@ -145,6 +155,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        mouthTrialDialog?.dismiss()
         preferencesSheet?.dialog?.dismiss()
         if(::ui.isInitialized)ui.close()
         if (::accounts.isInitialized) accounts.close()
@@ -283,6 +294,19 @@ class MainActivity : ComponentActivity() {
             text = "根据文字区域对焦、适度缩放；无文字时小幅搜索后回退。保留已检测到的多题文字，手动缩放后暂停自动变焦12秒。"
             textSize = 12f; setTextColor(AppPalette.muted); setPadding(0, 0, 0, dp(8))
         })
+        label("嘴型控制拍照",true)
+        val mouthCapture=toggle("张嘴保持后拍照（前后镜头切换）","mouth_capture",false)
+        label("开启后先用前置检测嘴部：闭嘴就绪后张嘴保持，切到后置对焦拍题；解题结束或失败后回到前置。此模式暂停自动取题，手动拍照仍可用，仅支持手机镜头。")
+        label("张嘴保持时长")
+        val mouthHoldValues=listOf(600,1000,1500)
+        val mouthHold=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,listOf("0.6 秒 · 快速触发","1 秒 · 减少误触","1.5 秒 · 更稳妥"));setSelection(mouthHoldValues.indexOf(prefs.getInt("mouth_hold_ms",600)).coerceAtLeast(0))}
+        panel.addView(mouthHold)
+        label("张嘴幅度")
+        val mouthThresholdValues=listOf(16,22,30)
+        val mouthThreshold=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,listOf("较小张嘴 · 灵敏","正常张嘴 · 推荐","张大嘴 · 减少误触"));setSelection(mouthThresholdValues.indexOf(prefs.getInt("mouth_threshold",22)).coerceAtLeast(0))}
+        panel.addView(mouthThreshold)
+        label("前置画面只在本机处理，不保存、不上传；触发后至少冷却 2.5 秒并需重新闭嘴。请保持手机后置对准题目，切镜头时不要移动。修改时长或幅度后请先保存，再试用。")
+        panel.addView(sheet.button("试用嘴型检测（不拍题）"){showMouthTrial()},LinearLayout.LayoutParams(-1,dp(48)).apply{topMargin=dp(10)})
         label("后台运行", true)
         val background = toggle("后台与锁屏运行", "background_enabled", false)
         panel.addView(TextView(this).apply {
@@ -344,7 +368,9 @@ class MainActivity : ComponentActivity() {
         connection.setOnClickListener { val open = connectionPanel.visibility == View.VISIBLE; connectionPanel.visibility = if (open) View.GONE else View.VISIBLE; connection.text = if (open) "连接设置  ›" else "连接设置  ⌄" }
         val dialog=sheet.dialog
         sheet.footer("保存偏好") {
+            if(mouthCapture.isChecked&&engine.isNetworkCamera()){Toast.makeText(this,"请先切换为手机镜头，再开启嘴型控制",Toast.LENGTH_LONG).show();return@footer}
             prefs.edit().putBoolean("auto_focus", autoFocus.isChecked).putBoolean("auto_zoom", autoZoom.isChecked)
+                .putBoolean("mouth_capture",mouthCapture.isChecked).putInt("mouth_hold_ms",mouthHoldValues[mouthHold.selectedItemPosition]).putInt("mouth_threshold",mouthThresholdValues[mouthThreshold.selectedItemPosition])
                 .putBoolean("anti_shake",antiShake.isChecked)
                 .putBoolean("fast_answers",fastAnswers.isChecked).putBoolean("stream_answers",streamAnswers.isChecked).putBoolean("optimize_upload",optimizeUpload.isChecked).putBoolean("speak_answer_detail",answerDetail.isChecked)
                 .putBoolean("new_topic_priority",newTopicPriority.isChecked)

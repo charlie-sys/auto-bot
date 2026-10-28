@@ -49,6 +49,15 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     private val detector = QuestionDetector()
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private val networkExecutor = Executors.newFixedThreadPool(2)
+    private val faceExecutor=Executors.newSingleThreadExecutor()
+    private var mouthDetector:MouthFaceAnalyzer?=null
+    private var mouthActive=false
+    private var mouthMessage=""
+    private var mouthConfig=""
+    private var mouthBackPhase=false
+    private var mouthGate:MouthGestureGate?=null
+    private fun wantsMouth()=prefs.getBoolean("mouth_capture",false)
+    private fun mouthSignature()="${prefs.getInt("mouth_hold_ms",600)}:${prefs.getInt("mouth_threshold",22)}"
     private val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
     private var ui: ReaderUi? = null
     private var previewCase: Preview? = null
@@ -186,6 +195,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         ui = view
         view.setMuted(prefs.getBoolean("muted", false))
         view.setStatus(status)
+        view.setMouthState(mouthActive,mouthMessage,!mouthBackPhase)
         refreshCameraUi()
         view.setNetworkCamera(isNetworkCamera())
         if(isNetworkCamera()){view.setZoom(networkZoom);view.showNetworkFrame(networkBitmap)}
@@ -201,15 +211,14 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         val provider = cameraProvider ?: return
         if (!running || camera == null || previewCase != null) return
         val useCase = Preview.Builder().build().also { it.surfaceProvider = view.preview.surfaceProvider }
-        runCatching { provider.bindToLifecycle(owner, selector(), useCase) }
+        runCatching { provider.bindToLifecycle(owner, if(mouthActive&&!mouthBackPhase)CameraSelector.DEFAULT_FRONT_CAMERA else selector(), useCase) }
             .onSuccess { previewCase = useCase }
             .onFailure { setStatus("预览恢复失败：${it.message}") }
     }
 
     fun detachUi() {
         ui?.showNetworkFrame(null)
-        previewCase?.let { cameraProvider?.unbind(it) }
-        previewCase = null
+        previewCase?.let { cameraProvider?.unbind(it) };previewCase = null
         ui = null
         readingResults = false
     }
@@ -251,6 +260,9 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
             if (statusSpeechActive) { tts?.stop(); statusSpeechActive = false }
         }
         if (!canSpeak()) stopSpeech()
+        if(running&&!isNetworkCamera()&&(wantsMouth()!=mouthActive||(mouthActive&&mouthConfig!=mouthSignature()))){
+            val wasPaused=paused;stopScanning();startScanning();paused=wasPaused
+        }
     }
 
     fun resetAccount() {
@@ -275,6 +287,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         recognizer.close()
         tts?.shutdown()
         cameraExecutor.shutdown()
+        faceExecutor.shutdown()
         networkExecutor.shutdown()
     }
 
@@ -415,10 +428,11 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         ui?.setNetworkCamera(false)
         val canSwitch = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_FRONT) &&
             packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA)
-        ui?.setCameraFacing(lensFacing == CameraSelector.LENS_FACING_FRONT, canSwitch, cameraStarting)
+        ui?.setCameraFacing(if(mouthActive)!mouthBackPhase else lensFacing == CameraSelector.LENS_FACING_FRONT, canSwitch&&!wantsMouth(), cameraStarting)
     }
 
     fun flipCamera() {
+        if(wantsMouth()){setStatus("嘴型控制使用后置拍题；请先关闭嘴型控制再翻转镜头");return}
         if(isNetworkCamera()){setStatus("网络相机不支持前后镜头翻转，请在设置切换来源");return}
         if (closed || busy || capturing || cameraStarting) return
         val target = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
@@ -656,9 +670,92 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         }
     }
 
+    private fun mouthState(message:String){mouthMessage=message;ui?.setMouthState(mouthActive,message,!mouthBackPhase)}
+
+    private fun bindMouthFront(provider:ProcessCameraProvider,generation:Long){
+        check(provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)&&provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)){"嘴型拍照需要可用的前置与后置摄像头"}
+        mouthDetector?.close();mouthDetector=null
+        provider.unbindAll();camera?.cameraInfo?.zoomState?.removeObservers(owner)
+        capture=null;analysisCase=null;mouthBackPhase=false;mouthGate?.reset()
+        val preview=ui?.let{view->Preview.Builder().build().also{it.setSurfaceProvider(view.preview.surfaceProvider)}}
+        previewCase=preview
+        val resolution=ResolutionSelector.Builder().setResolutionStrategy(ResolutionStrategy(android.util.Size(640,480),ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)).build()
+        val frontAnalysis=ImageAnalysis.Builder().setResolutionSelector(resolution).setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+        val face=MouthFaceAnalyzer{aperture,reason->
+            runOnUiThread{
+                if(!closed&&running&&mouthActive&&!mouthBackPhase&&generation==cameraGeneration){
+                    val eligible=!paused&&!readingResults&&!busy&&!capturing&&!cameraStarting&&(ui!=null||prefs.getBoolean("background_enabled",false))
+                    val state=mouthGate?.observe(android.os.SystemClock.elapsedRealtime(),aperture,eligible)
+                    mouthState(if(aperture==null&&eligible)reason else state?.message.orEmpty())
+                    if(state?.fire==true&&eligible){switchMouthToRear("",0L)}
+                }
+            }
+        }
+        mouthDetector=face;frontAnalysis.setAnalyzer(faceExecutor){face.analyze(it)}
+        camera=if(preview!=null)provider.bindToLifecycle(owner,CameraSelector.DEFAULT_FRONT_CAMERA,preview,frontAnalysis)
+            else provider.bindToLifecycle(owner,CameraSelector.DEFAULT_FRONT_CAMERA,frontAnalysis)
+        mouthState("请先闭嘴，再张嘴保持拍题；前置画面仅在本机处理")
+        ui?.overlay?.updateBoxes(emptyList(),1,1)
+        setStatus(if(paused)"嘴型拍照已暂停" else "前置嘴型检测已开启，张嘴保持后切换后置拍题")
+    }
+
+    private fun switchMouthToRear(text:String,hash:Long){
+        val provider=cameraProvider?:return
+        if(!mouthActive||mouthBackPhase||!running||paused||readingResults||busy||capturing||closed)return
+        mouthBackPhase=true;cameraStarting=true;val generation=++cameraGeneration
+        mouthGate?.reset();mouthDetector?.close();mouthDetector=null
+        setStatus("已收到拍照指令，正在切换后置镜头")
+        mouthState("请保持手机与题目稳定，后置对焦完成后自动拍照")
+        try {
+            provider.unbindAll();previewCase=null;analysisCase=null
+            lensFacing=CameraSelector.LENS_FACING_BACK
+            capture=ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
+            val preview=ui?.let{view->Preview.Builder().build().also{it.setSurfaceProvider(view.preview.surfaceProvider)}}
+            previewCase=preview
+            camera=if(preview!=null)provider.bindToLifecycle(owner,CameraSelector.DEFAULT_BACK_CAMERA,capture,preview)
+                else provider.bindToLifecycle(owner,CameraSelector.DEFAULT_BACK_CAMERA,capture)
+            camera?.cameraInfo?.zoomState?.observe(owner){ui?.setZoom(it.zoomRatio)}
+            statusHandler.postDelayed(warmup@{
+                if(!running||!mouthActive||!mouthBackPhase||generation!=cameraGeneration||closed)return@warmup
+                var delivered=false
+                val shoot={
+                    if(!delivered&&running&&mouthActive&&mouthBackPhase&&generation==cameraGeneration&&!closed){
+                    delivered=true
+                    cameraStarting=false;refreshCameraUi()
+                    if(paused||readingResults)returnMouthFront("已取消拍题，请返回识题页后闭嘴重试")
+                    else captureQuestion(text,hash)
+                    }
+                }
+                val active=camera
+                val action=FocusMeteringAction.Builder(SurfaceOrientedMeteringPointFactory(1f,1f).createPoint(.5f,.5f,.25f),FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE).setAutoCancelDuration(3,java.util.concurrent.TimeUnit.SECONDS).build()
+                val focused=runCatching{
+                    if(prefs.getBoolean("auto_focus",true)&&active!=null&&active.cameraInfo.isFocusMeteringSupported(action)){
+                        focusRequests++
+                        val future=active.cameraControl.startFocusAndMetering(action)
+                        future.addListener({if(runCatching{future.get().isFocusSuccessful}.getOrDefault(false))focusSuccesses++;shoot()},ContextCompat.getMainExecutor(this))
+                        true
+                    }else false
+                }.getOrDefault(false)
+                statusHandler.postDelayed({shoot()},if(focused)2000L else 600L)
+            },350)
+        }catch(_:Exception){returnMouthFront("后置镜头启动失败，已尝试返回前置，请重新开始")}
+    }
+
+    private fun returnMouthFront(message:String="解题已结束，已返回前置；请闭嘴后再次张嘴"){
+        if(!mouthActive||!mouthBackPhase||!running||closed)return
+        val provider=cameraProvider?:return
+        val generation=++cameraGeneration;cameraStarting=true
+        try {bindMouthFront(provider,generation);setStatus(message)}
+        catch(_:Exception){stopScanning();setStatus("前置镜头恢复失败，请重新点击开始识题")}
+        finally{cameraStarting=false;refreshCameraUi();ui?.updateSession(running,paused,busy,capturing)}
+    }
+
     fun startScanning() {
         if (account.token().isBlank()) { onAuthExpired?.invoke(); return }
-        if(isNetworkCamera()){startNetworkScanning();return}
+        if(isNetworkCamera()){
+            if(wantsMouth()){setStatus("嘴型控制当前仅支持手机后置镜头，请切回手机镜头或关闭嘴型控制");return}
+            startNetworkScanning();return
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             manualAfterStart = false; setStatus("需要摄像头权限才能识题"); return
         }
@@ -682,6 +779,13 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                 cameraProvider = provider
                 provider.unbindAll()
                 previewCase = null
+                if(wantsMouth()){
+                    mouthActive=true;mouthBackPhase=false;mouthConfig=mouthSignature()
+                    mouthGate=MouthGestureGate(prefs.getInt("mouth_hold_ms",600).coerceIn(600,1500).toLong(),prefs.getInt("mouth_threshold",22).coerceIn(16,30)/100f)
+                    bindMouthFront(provider,generation)
+                    if(manualAfterStart){manualAfterStart=false;statusHandler.postDelayed({if(running&&generation==cameraGeneration)captureQuestion("",0L)},700)}
+                    return@addListener
+                }
                 
                 capture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
                 val resolution = ResolutionSelector.Builder().setResolutionStrategy(
@@ -696,7 +800,11 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                 camera?.cameraInfo?.zoomState?.observe(owner) { state -> ui?.setZoom(state.zoomRatio) }
                 setStatus(if (paused) "已暂停识题与播报" else "正在自动查找完整题目；可双指或点＋－缩放")
                 if (manualAfterStart) { manualAfterStart = false; statusHandler.postDelayed({ if (running && generation == cameraGeneration) captureQuestion("", 0L) }, 500) }
-            } catch (e: Exception) { running = false; manualAfterStart = false; setStatus("摄像头启动失败：${e.message}") }
+            } catch (e: Exception) {
+                cameraProvider?.unbindAll();mouthDetector?.close();mouthDetector=null;mouthActive=false;ui?.setMouthState(false,"")
+                capture=null;camera=null;analysisCase=null;previewCase=null
+                running = false; manualAfterStart = false; setStatus("摄像头启动失败：${e.message}")
+            }
             finally {
                 if (generation == cameraGeneration) {
                     cameraStarting = false
@@ -732,6 +840,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
         ++adjustmentVersion; ++focusTicket; focusPending = false
         assistSettleUntil = 0L
         ++cameraGeneration
+        mouthDetector?.close();mouthDetector=null;mouthGate=null;mouthActive=false;mouthBackPhase=false;mouthMessage="";ui?.setMouthState(false,"")
         cameraStarting = false
         running = false
         paused = false
@@ -750,6 +859,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     }
 
     fun analyze(proxy: ImageProxy) {
+        if(mouthActive){proxy.close();return}
         val now = System.currentTimeMillis()
         val generation = cameraGeneration
         val adjustment = adjustmentVersion
@@ -813,6 +923,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     }
 
     fun manualCapture(force: Boolean) {
+        if(mouthActive&&(busy||capturing||cameraStarting||mouthBackPhase)){setStatus("当前正在拍题或解题，请等待完成；也可先中断任务");return}
         interruptCurrent(false)
         if (!running) { manualAfterStart = true; startScanning(); return }
         paused = false
@@ -823,13 +934,14 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
     fun captureQuestion(text: String, hash: Long, steady:Boolean=false) {
         if (capturing) return
         if(isNetworkCamera()){captureNetworkDirect(text);return}
+        if(mouthActive&&!mouthBackPhase){switchMouthToRear(text,hash);return}
         if(steady && prefs.getBoolean("anti_shake",true)){captureSteadyQuestion(text,hash);return}
         val useCase = capture ?: return
         val sceneText=text.ifBlank {observedText.takeIf {android.os.SystemClock.elapsedRealtime()-observedAt<2500}.orEmpty()}
         needsSceneAnchor=sceneText.isBlank()
         if(sceneText.isNotBlank())detector.markQueued(sceneText,hash)
         val raw = runCatching { File.createTempFile("raw_", ".jpg", cacheDir) }.getOrElse {
-            setStatus("图片处理失败：无法创建照片文件"); return
+            setStatus("图片处理失败：无法创建照片文件");returnMouthFront("无法保存题图，已返回前置，请检查存储空间"); return
         }
         capturing = true
         val id = ++requestId
@@ -840,6 +952,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
             if (finishPhoto(id, generation)) {
                 runCatching { camera?.cameraControl?.cancelFocusAndMetering() }
                 setStatus("拍照失败：等待相机超时，请保持稳定后重试")
+                returnMouthFront("拍照超时，已返回前置；请闭嘴后重试")
             }
         }.also { statusHandler.postDelayed(it, 12_000L) }
         try { useCase.takePicture(ImageCapture.OutputFileOptions.Builder(raw).build(), cameraExecutor, object : ImageCapture.OnImageSavedCallback {
@@ -854,12 +967,12 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                         latest = item
                         send(item)
                     }
-                } catch (e: Exception) { raw.delete(); runOnUiThread { if (finishPhoto(id, generation)) setStatus("图片处理失败：${e.message}") } }
+                } catch (e: Exception) { raw.delete(); runOnUiThread { if (finishPhoto(id, generation)){setStatus("图片处理失败：${e.message}");returnMouthFront("题图处理失败，已返回前置；请闭嘴后重试")} } }
             }
-            override fun onError(exception: ImageCaptureException) { raw.delete(); runOnUiThread { if (finishPhoto(id, generation)) setStatus("拍照失败：${exception.message}") } }
+            override fun onError(exception: ImageCaptureException) { raw.delete(); runOnUiThread { if (finishPhoto(id, generation)){setStatus("拍照失败：${exception.message}");returnMouthFront("拍照失败，已返回前置；请闭嘴后重试")} } }
         }) } catch (e: Exception) {
             raw.delete()
-            if (finishPhoto(id, generation)) setStatus("拍照失败：${e.message}")
+            if (finishPhoto(id, generation)){setStatus("拍照失败：${e.message}");returnMouthFront("拍照失败，已返回前置；请闭嘴后重试")}
         }
     }
 
@@ -1083,6 +1196,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
                     }
                 }
                 item.file.delete()
+                returnMouthFront(if(response.isSuccess)"解题结束，已返回前置；请闭嘴后再次张嘴" else "解题未完成，已返回前置；请检查连接后重试")
             }
         }
     }
@@ -1128,6 +1242,7 @@ class ReaderEngine(context: Context, private val owner: LifecycleOwner) : Contex
             paused=running
             if(lastResult==null){resultMessage="已中断当前解答" to "切换题目后点继续；同题重做请点拍照识题";ui?.showMessage(resultMessage!!.first,resultMessage!!.second)}
             setStatus("已中断当前解答与播报，切换题目后点继续；同题可手动重新识别")
+            returnMouthFront("已中断，返回前置并暂停；点击继续后闭嘴重试")
         }
     }
 
